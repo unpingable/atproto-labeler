@@ -1,0 +1,26 @@
+{"evidence":[{"post":"uri:demo:1"}],"label":"quote_mismatch","reasons":["quote or attribution present but no link/facet found"],"score":0.55,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1","prior":"uri:demo:5"}],"label":"repeat_claim_no_new_evidence","reasons":["claim repeated without new evidence"],"score":0.6,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1"}],"label":"quote_mismatch","reasons":["quote or attribution present but no link/facet found"],"score":0.55,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1","prior":"uri:demo:5"}],"label":"repeat_claim_no_new_evidence","reasons":["claim repeated without new evidence"],"score":0.6,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1"}],"label":"quote_mismatch","reasons":["quote or attribution present but no link/facet found"],"score":0.55,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1","prior":"uri:demo:5"}],"label":"repeat_claim_no_new_evidence","reasons":["claim repeated without new evidence"],"score":0.6,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1"}],"label":"quote_mismatch","reasons":["quote or attribution present but no link/facet found"],"score":0.55,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1","prior":"uri:demo:5"}],"label":"repeat_claim_no_new_evidence","reasons":["claim repeated without new evidence"],"score":0.6,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1"}],"label":"quote_mismatch","reasons":["quote or attribution present but no link/facet found"],"score":0.55,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1","prior":"uri:demo:5"}],"label":"repeat_claim_no_new_evidence","reasons":["claim repeated without new evidence"],"score":0.6,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1"}],"label":"quote_mismatch","reasons":["quote or attribution present but no link/facet found"],"score":0.55,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1","prior":"uri:demo:5"}],"label":"repeat_claim_no_new_evidence","reasons":["claim repeated without new evidence"],"score":0.6,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1"}],"label":"quote_mismatch","reasons":["quote or attribution present but no link/facet found"],"score":0.55,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1","prior":"uri:demo:5"}],"label":"repeat_claim_no_new_evidence","reasons":["claim repeated without new evidence"],"score":0.6,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1"}],"label":"quote_mismatch","reasons":["quote or attribution present but no link/facet found"],"score":0.55,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1","prior":"uri:demo:5"}],"label":"repeat_claim_no_new_evidence","reasons":["claim repeated without new evidence"],"score":0.6,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1"}],"label":"quote_mismatch","reasons":["quote or attribution present but no link/facet found"],"score":0.55,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1","prior":"uri:demo:5"}],"label":"repeat_claim_no_new_evidence","reasons":["claim repeated without new evidence"],"score":0.6,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1"}],"label":"quote_mismatch","reasons":["quote or attribution present but no link/facet found"],"score":0.55,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1","prior":"uri:demo:5"}],"label":"repeat_claim_no_new_evidence","reasons":["claim repeated without new evidence"],"score":0.6,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1"}],"label":"quote_mismatch","reasons":["quote or attribution present but no link/facet found"],"score":0.55,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1","prior":"uri:demo:5"}],"label":"repeat_claim_no_new_evidence","reasons":["claim repeated without new evidence"],"score":0.6,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1"}],"label":"quote_mismatch","reasons":["quote or attribution present but no link/facet found"],"score":0.55,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1","prior":"uri:demo:5"}],"label":"repeat_claim_no_new_evidence","reasons":["claim repeated without new evidence"],"score":0.6,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1"}],"label":"quote_mismatch","reasons":["quote or attribution present but no link/facet found"],"score":0.55,"subject_uri":"uri:demo:1"}
+{"evidence":[{"post":"uri:demo:1","prior":"uri:demo:5"}],"label":"repeat_claim_no_new_evidence","reasons":["claim repeated without new evidence"],"score":0.6,"subject_uri":"uri:demo:1"}
