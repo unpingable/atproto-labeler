@@ -33,12 +33,9 @@ async def startup_event():
     # Optionally start longitudinal recheck loop when env var is set
     if os.getenv("ENABLE_LONGITUDINAL_RECHECK") == "1":
         from .longitudinal import run_periodic as _lr
-        loop = asyncio.get_event_loop()
-        # allow configuring interval via RECHECK_INTERVAL env
-        _label_recheck_task = loop.create_task(_lr())
-        # store on module for potential shutdown
         global _label_recheck_task
-        _label_recheck_task = _label_recheck_task
+        loop = asyncio.get_event_loop()
+        _label_recheck_task = loop.create_task(_lr())
 
 
 @app.on_event("shutdown")
@@ -213,6 +210,35 @@ async def recent_decisions(limit: int = 50, rule_id: str = None, auth=Depends(ad
             }
         )
     return {"decisions": out}
+
+
+@app.get("/quarantine/recent")
+async def quarantine_recent(limit: int = 50, auth=Depends(admin_auth)):
+    limit = max(1, min(int(limit), 500))
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT emit_id, created_at, emit_mode, emit_status, emit_reason, payload_json FROM quarantine_emits ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        payload = {}
+        try:
+            payload = json.loads(r[5] or "{}")
+        except Exception:
+            payload = {}
+        out.append(
+            {
+                "emit_id": r[0],
+                "created_at": r[1],
+                "emit_mode": r[2],
+                "emit_status": r[3],
+                "emit_reason": r[4],
+                "payload": payload,
+            }
+        )
+    return {"quarantined": out}
 
 
 if __name__ == "__main__":

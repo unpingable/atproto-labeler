@@ -169,6 +169,20 @@ def init_db():
         """
     )
 
+    # quarantined/suppressed emits (audit trail)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS quarantine_emits (
+            emit_id TEXT PRIMARY KEY,
+            created_at TIMESTAMP,
+            emit_mode TEXT,
+            emit_status TEXT,
+            emit_reason TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -486,6 +500,19 @@ def expire_label_decisions(subject_uri: str, label_name: str) -> int:
         count = rows[0][0] if rows else 0
     conn.close()
     return count
+
+
+def insert_quarantine_emit(emit_mode: str, emit_status: str, emit_reason: str, payload: dict) -> str:
+    emit_id = str(uuid.uuid4())
+    created_at = timeutil.now_utc().isoformat()
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO quarantine_emits VALUES (?, ?, ?, ?, ?, ?)",
+        (emit_id, created_at, emit_mode, emit_status, emit_reason or "", json.dumps(payload, sort_keys=True)),
+    )
+    conn.commit()
+    conn.close()
+    return emit_id
 
 
 def enqueue_claim_recheck(authorDid: str, claim_fingerprint: str) -> None:

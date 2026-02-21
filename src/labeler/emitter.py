@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 from .emit_mode import get_emit_audit_path
+from .db import insert_quarantine_emit
 
 
 def emit_labels_to_audit(labels: List[dict], audit_path: str = "out/live_emits.jsonl"):
@@ -33,4 +34,15 @@ def record_emit_decision(labels: List[dict], mode: str, audit_path: str = None) 
         rec["emit_mode"] = mode_norm
         recs.append(rec)
     path = emit_labels_to_audit(recs, audit_path=audit_path)
+    if status == "suppressed":
+        for rec in recs:
+            try:
+                insert_quarantine_emit(
+                    emit_mode=mode_norm,
+                    emit_status=status,
+                    emit_reason=rec.get("emit_reason", ""),
+                    payload=rec,
+                )
+            except Exception:
+                pass
     return path, status

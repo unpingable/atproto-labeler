@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from labeler.main import app
 
 
-def test_admin_endpoints_require_token(monkeypatch):
+def test_admin_endpoints_require_token(monkeypatch, caplog):
     # set env token
     monkeypatch.setenv("ADMIN_API_TOKEN", "s3cr3t")
 
