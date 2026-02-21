@@ -137,4 +137,4 @@ governance — is formalized in the ATProto governance transfer proof.
 
 ## License
 
-Apache 2.0
+Unless otherwise noted, this repository is licensed under MIT OR Apache-2.0, at your option. Contributions are accepted under the same terms.
