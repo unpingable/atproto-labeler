@@ -183,6 +183,11 @@ def init_db():
         """
     )
 
+    # index for hourly rollup queries in facts_export (createdAt range scans)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_claim_history_created ON claim_history(createdAt)"
+    )
+
     conn.commit()
     conn.close()
 
