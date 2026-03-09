@@ -21,7 +21,16 @@ def get_conn():
     if backend == "sqlite":
         db_path = DATA_DIR / "labeler.sqlite"
         conn = sqlite3.connect(str(db_path))
-        # return rows as tuples (keep compatibility with existing code)
+        # WAL mode: concurrent reads + writes, crash-safe
+        conn.execute("PRAGMA journal_mode=WAL")
+        # Wait up to 60s for locks instead of failing immediately
+        conn.execute("PRAGMA busy_timeout=60000")
+        # NORMAL sync is safe with WAL and much faster than FULL
+        conn.execute("PRAGMA synchronous=NORMAL")
+        # Cap page cache to ~50MB so aggregates don't eat all RAM
+        conn.execute("PRAGMA cache_size=-50000")
+        # Force temp tables (GROUP BY, ORDER BY) to disk instead of RAM
+        conn.execute("PRAGMA temp_store=FILE")
         return conn
     elif backend == "duckdb":
         try:
