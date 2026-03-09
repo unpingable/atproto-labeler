@@ -41,6 +41,14 @@ release rail gates promotion on stability report results.
 and audit context. Nothing is silently dropped. The quarantine CLI and API
 endpoints allow inspection and release with provenance.
 
+**Operational hardening.** SQLite runs in WAL mode with tuned pragmas
+(busy_timeout, synchronous=NORMAL, cache sizing). A preflight check validates
+DB health, disk space, and core tables at startup. A disk pressure brake pauses
+event processing when usage exceeds thresholds. Retention loops prune old events,
+edges, and claim history in batches to control DB growth. The consumer emits
+periodic STATS lines for observability and handles SIGTERM/SIGINT for graceful
+shutdown with cursor commit.
+
 ## Quickstart
 
 ```bash
@@ -67,7 +75,7 @@ docker compose logs -f worker
 ```
 
 The simulated labeler returns 429s for initial requests to exercise retry and
-cooldown behavior. The shared `./data` directory holds the DuckDB database.
+cooldown behavior. The shared `./data` directory holds the SQLite database.
 
 ## CLI
 
@@ -97,7 +105,11 @@ python -m labeler.cli release promote --in out/release_manifest_quarantine.json
 | `ENABLE_LONGITUDINAL_RECHECK` | `0` | Enable longitudinal recheck loop |
 | `ENABLE_CLAIM_RECHECK` | `0` | Enable claim-group recheck scheduling |
 | `CLAIM_RECHECK_MAX_PER_RUN` | — | Cap claim-group work per recheck loop |
+| `ENABLE_RETENTION` | `0` | Enable periodic retention loop (prune old data) |
+| `RETENTION_INTERVAL_HOURS` | `6` | Hours between retention passes |
 | `ADMIN_API_TOKEN` | — | Protect admin endpoints; open access if unset |
+| `FIREHOSE_WS_URL` | Jetstream US-East | Jetstream WebSocket endpoint |
+| `JETSTREAM_COLLECTIONS` | `post,repost` | Comma-separated collections to subscribe |
 | `DB_BACKEND` | `sqlite` | `sqlite` or `duckdb` |
 
 ## Invariants
@@ -110,15 +122,15 @@ python -m labeler.cli release promote --in out/release_manifest_quarantine.json
 ## Architecture
 
 ```
-firehose -> consumer -> events/edges/cursors (append-only)
-                          |
-                    claim_history (fingerprinted, longitudinal)
-                          |
-                    drift rules (assertiveness, provenance laundering)
-                          |
-                    label_decisions (receipted)
-                          |
-                    emit_mode gate -> audit log / quarantine / live emit
+Jetstream (JSON/WS) -> consumer -> events/edges/cursors (append-only)
+                                      |
+                                claim_history (fingerprinted, longitudinal)
+                                      |
+                                drift rules (assertiveness, provenance laundering)
+                                      |
+                                label_decisions (receipted)
+                                      |
+                                emit_mode gate -> audit log / quarantine / live emit
 ```
 
 ## Design notes
