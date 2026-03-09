@@ -1,21 +1,30 @@
 import os
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response, Depends, Header
-import os
 from .db import init_db, get_conn
 from .consumer import ATProtoConsumer
 import asyncio
 import json
+import logging
 
 app = FastAPI(title="Bluesky Labeler MVP")
 
 _consumer_task = None
 _label_ingest_task = None
 
+LOG = logging.getLogger("labeler.main")
+
 
 @app.on_event("startup")
 async def startup_event():
     init_db()
+
+    # Run preflight checks
+    from .preflight import run_preflight
+    preflight = run_preflight()
+    if preflight.get("verdict") == "FAIL":
+        LOG.error("preflight FAILED: %s", preflight)
+
     # Optionally start the consumer in background when env var is set
     if os.getenv("FIREHOSE_AUTO_START") == "1":
         loop = asyncio.get_event_loop()
@@ -43,6 +52,23 @@ async def startup_event():
         loop = asyncio.get_event_loop()
         loop.create_task(_fe())
 
+    # Optionally start retention loop
+    if os.environ.get("ENABLE_RETENTION", "").lower() in ("1", "true"):
+        loop = asyncio.get_event_loop()
+        loop.create_task(_retention_loop())
+
+
+async def _retention_loop():
+    """Periodic retention pass to prune old data."""
+    from .retention import run_retention
+    interval_hours = int(os.getenv("RETENTION_INTERVAL_HOURS", "6"))
+    while True:
+        await asyncio.sleep(interval_hours * 3600)
+        try:
+            run_retention()
+        except Exception:
+            LOG.exception("retention pass failed")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -62,6 +88,7 @@ async def health():
 @app.get("/health/extended")
 async def health_extended():
     from .emit_mode import get_emit_mode
+    from .preflight import check_disk, is_disk_pressure
     try:
         from . import metrics as metrics_module
         quarantine_trips = metrics_module.RECHECK_QUARANTINE_TRIPPED._value.get()
@@ -75,16 +102,28 @@ async def health_extended():
     cursor_info = None
     if cursor_rows:
         cursor_info = {"consumer": cursor_rows[0][0], "cursor": cursor_rows[0][1], "updated_at": cursor_rows[0][2]}
+    disk = check_disk()
     return {
         "status": "ok",
         "emit_mode": get_emit_mode(),
         "queue_depth": queue_depth,
         "last_cursor": cursor_info,
         "quarantine_trips": quarantine_trips,
+        "disk": disk,
+        "disk_pressure": is_disk_pressure(),
     }
 
 
-import logging
+@app.get("/health/preflight")
+async def health_preflight():
+    from .preflight import run_preflight
+    result = run_preflight()
+    status_code = 200 if result.get("verdict") == "PASS" else 503
+    return Response(
+        content=json.dumps(result),
+        media_type="application/json",
+        status_code=status_code,
+    )
 
 
 async def admin_auth(authorization: str = Header(None), x_admin_token: str = Header(None, alias="X-Admin-Token")):
