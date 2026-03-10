@@ -110,7 +110,7 @@ python -m labeler.cli release promote --in out/release_manifest_quarantine.json
 | `ADMIN_API_TOKEN` | — | Protect admin endpoints; open access if unset |
 | `FIREHOSE_WS_URL` | Jetstream US-East | Jetstream WebSocket endpoint |
 | `JETSTREAM_COLLECTIONS` | `post,repost` | Comma-separated collections to subscribe |
-| `DB_BACKEND` | `sqlite` | `sqlite` or `duckdb` |
+| `ENABLE_FACTS_EXPORT` | `0` | Enable facts sidecar export for labelwatch bridge |
 
 ## Invariants
 
@@ -123,15 +123,30 @@ python -m labeler.cli release promote --in out/release_manifest_quarantine.json
 
 ```
 Jetstream (JSON/WS) -> consumer -> events/edges/cursors (append-only)
-                                      |
-                                claim_history (fingerprinted, longitudinal)
-                                      |
-                                drift rules (assertiveness, provenance laundering)
-                                      |
-                                label_decisions (receipted)
-                                      |
-                                emit_mode gate -> audit log / quarantine / live emit
+                          |                |
+                     put_nowait       claim_history (fingerprinted, longitudinal)
+                     (non-blocking)        |
+                          |           drift rules (assertiveness, provenance laundering)
+                     drain queue           |
+                          |           label_decisions (receipted)
+                     STATS heartbeat       |
+                                      emit_mode gate -> audit log / quarantine / live emit
+                                           |
+                                      facts_export -> facts.sqlite (labelwatch bridge)
 ```
+
+The consumer uses a non-blocking queue (`put_nowait`) to decouple the WebSocket
+receive loop from DB writes, preventing missed pings and reconnect churn. A disk
+pressure brake pauses event processing when disk usage exceeds thresholds. A
+platform health module (EWMA baseline) gates recheck enqueueing during stream
+degradation.
+
+## Related projects
+
+- [labelwatch](https://github.com/unpingable/atproto-labelwatch) — observatory
+  for ATProto's labeling infrastructure. Monitors labeler behavior, detects
+  anomalies, derives regime states, serves label climate reports. Driftwatch
+  exports facts to labelwatch via a SQLite sidecar bridge (`facts_export.py`).
 
 ## Design notes
 
