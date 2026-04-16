@@ -61,6 +61,23 @@ def run_retention() -> dict:
         conn, "claim_history", "createdAt", _cutoff(CLAIMS_DAYS)
     )
 
+    # TRUNCATE checkpoint after bulk deletes. PASSIVE (the default for
+    # auto-checkpoint) merges WAL pages back to the main DB but never
+    # shrinks the WAL file — so it grows to its high-water mark and stays.
+    # TRUNCATE additionally truncates the WAL file to zero, reclaiming disk.
+    # Will return busy=1 if a long-lived reader is holding a snapshot;
+    # that's fine, the next pass will try again. Not having this call
+    # leaves the system vulnerable to unbounded WAL growth if any external
+    # reader (sidecar exporter, debug tool) keeps a connection open.
+    if os.getenv("DB_BACKEND", "sqlite").lower() == "sqlite":
+        try:
+            result = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            stats["wal_checkpoint"] = {
+                "busy": result[0], "log": result[1], "checkpointed": result[2],
+            }
+        except Exception:
+            LOG.exception("wal_checkpoint failed")
+
     elapsed = time.monotonic() - t0
     LOG.info(
         "retention pass: events=%d edges=%d versions=%d claims=%d (%.1fs)",
