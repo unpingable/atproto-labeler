@@ -20,9 +20,10 @@ import logging
 import random
 import signal
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 import websockets
-from .db import insert_event, insert_edges, init_db, upsert_cursor, get_cursor
+from .db import insert_event, insert_edges, insert_event_txn, insert_edges_txn, init_db, upsert_cursor, get_cursor, get_conn
 from .extractor import extract_edges_from_event
 from . import timeutil
 
@@ -44,6 +45,13 @@ RECONNECT_BASE_S = 5
 RECONNECT_MAX_S = 60
 CURSOR_REWIND_US = 3_000_000  # 3s rewind on reconnect per Jetstream docs
 QUEUE_MAX = 5000
+
+# Batched-write knobs: drain up to N events per writer transaction, or wait at
+# most M seconds for the batch to fill. One commit per batch.
+# A naive per-event commit cadence (the obvious shape) self-sheds under real
+# firehose load — see docs/INGEST_INVARIANTS.md.
+BATCH_MAX_EVENTS = int(os.getenv("BATCH_MAX_EVENTS", "100"))
+BATCH_MAX_WAIT_S = float(os.getenv("BATCH_MAX_WAIT_S", "0.25"))
 
 
 def _build_ws_url(base_url: str, cursor: Optional[str] = None) -> str:
@@ -170,25 +178,71 @@ class ATProtoConsumer:
         self._dropped = 0
         self._reconnects = 0
         self._started_at = time.monotonic()
+        # Single-thread writer: ensures the persistent SQLite conn is only
+        # ever touched from one OS thread (sqlite3 default check_same_thread).
+        # See docs/INGEST_INVARIANTS.md for why batching is correctness, not
+        # optimization.
+        self._writer_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="lbl-writer"
+        )
+        self._writer_conn = None  # lazily opened inside the writer thread
 
-    def _process_event(self, ev: dict):
-        """Synchronous DB work — called via run_in_executor from drain task."""
-        event_uri = ev["uri"]
-        author = ev.get("authorDid") or ev.get("author")
-        ctime = ev.get("createdAt") or ev.get("time")
-        inserted, updated = insert_event(event_uri, ctime, author, ev)
-        if inserted:
-            self._inserts += 1
-        if updated:
-            self._updates += 1
-        edges = extract_edges_from_event(ev)
-        insert_edges(edges)
+    def _get_writer_conn(self):
+        """Return the persistent writer connection, opening it on first call.
+
+        Must only be called from the writer executor thread.
+        """
+        if self._writer_conn is None:
+            self._writer_conn = get_conn()
+        return self._writer_conn
+
+    def _process_batch(self, batch):
+        """Synchronous DB work for a batch of events. Runs in the writer thread.
+
+        One transaction, one commit per batch. On any exception, rolls back
+        the entire batch — we'd rather lose a batch than half-write it.
+
+        Returns (written, inserted_delta, updated_delta).
+        """
+        if not batch:
+            return (0, 0, 0)
+        conn = self._get_writer_conn()
+        inserted_delta = 0
+        updated_delta = 0
+        try:
+            for ev in batch:
+                event_uri = ev["uri"]
+                author = ev.get("authorDid") or ev.get("author")
+                ctime = ev.get("createdAt") or ev.get("time")
+                inserted, updated = insert_event_txn(conn, event_uri, ctime, author, ev)
+                if inserted:
+                    inserted_delta += 1
+                if updated:
+                    updated_delta += 1
+                edges = extract_edges_from_event(ev)
+                insert_edges_txn(conn, edges)
+            conn.commit()
+            return (len(batch), inserted_delta, updated_delta)
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                LOG.exception("rollback failed after batch error")
+            LOG.exception("batch failed; rolled back %d events", len(batch))
+            return (0, 0, 0)
 
     async def _drain_queue(self):
-        """Background task: drain event queue without blocking the WS read loop."""
+        """Background task: drain event queue in batches without blocking WS read.
+
+        Pulls up to BATCH_MAX_EVENTS (or BATCH_MAX_WAIT_S, whichever first)
+        and hands the whole batch to the dedicated writer thread, which runs
+        one transaction with one commit. Per-event SQLite connection churn
+        and per-event fsync barriers were the bottleneck pre-fix.
+        """
         from .preflight import is_disk_pressure
         loop = asyncio.get_running_loop()
         _brake_logged = False
+        events_since_cursor_save = 0
 
         while not self._stop:
             # Disk pressure brake
@@ -202,29 +256,61 @@ class ATProtoConsumer:
                 LOG.info("DISK PRESSURE: cleared, resuming")
                 _brake_logged = False
 
+            # Build a batch: first event blocks (with sane timeout); subsequent
+            # events are pulled non-blockingly until cap or short-wait deadline.
+            batch = []
             try:
-                ev = await asyncio.wait_for(self._event_queue.get(), timeout=5.0)
+                first = await asyncio.wait_for(self._event_queue.get(), timeout=5.0)
+                batch.append(first)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
 
+            deadline = loop.time() + BATCH_MAX_WAIT_S
+            while len(batch) < BATCH_MAX_EVENTS:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                try:
+                    ev = self._event_queue.get_nowait()
+                    batch.append(ev)
+                except asyncio.QueueEmpty:
+                    try:
+                        ev = await asyncio.wait_for(
+                            self._event_queue.get(), timeout=remaining
+                        )
+                        batch.append(ev)
+                    except asyncio.TimeoutError:
+                        break
+                    except asyncio.CancelledError:
+                        self._stop = True
+                        break
+
             try:
-                await loop.run_in_executor(None, self._process_event, ev)
+                written, inserted_delta, updated_delta = await loop.run_in_executor(
+                    self._writer_executor, self._process_batch, batch
+                )
             except Exception:
                 self._errors += 1
-                LOG.exception("failed to process event")
+                LOG.exception("failed to process batch")
+                written, inserted_delta, updated_delta = 0, 0, 0
 
-            self._msgs += 1
+            if written:
+                self._msgs += written
+                self._inserts += inserted_delta
+                self._updates += updated_delta
+                events_since_cursor_save += written
 
-            # Periodic cursor save
-            if self._msgs % CURSOR_SAVE_INTERVAL == 0 and self._last_cursor:
-                try:
-                    await loop.run_in_executor(
-                        None, upsert_cursor, CONSUMER_NAME, self._last_cursor
-                    )
-                except Exception:
-                    LOG.exception("failed to save cursor")
+                # Periodic cursor save (after a successful commit)
+                if events_since_cursor_save >= CURSOR_SAVE_INTERVAL and self._last_cursor:
+                    try:
+                        await loop.run_in_executor(
+                            None, upsert_cursor, CONSUMER_NAME, self._last_cursor
+                        )
+                        events_since_cursor_save = 0
+                    except Exception:
+                        LOG.exception("failed to save cursor")
 
     async def _stats_loop(self):
         """Emit periodic STATS line to stderr."""
@@ -337,6 +423,25 @@ class ATProtoConsumer:
                     await t
                 except asyncio.CancelledError:
                     pass
+
+            # Close the persistent writer connection from inside the writer
+            # thread, then shut the executor down. Order matters: don't
+            # shutdown the executor first or the close hop has nowhere to run.
+            def _close_writer():
+                if self._writer_conn is not None:
+                    try:
+                        self._writer_conn.close()
+                    except Exception:
+                        LOG.debug("writer conn close failed", exc_info=True)
+                    self._writer_conn = None
+
+            try:
+                await loop.run_in_executor(self._writer_executor, _close_writer)
+            except Exception:
+                LOG.debug("writer close hop failed", exc_info=True)
+            finally:
+                self._writer_executor.shutdown(wait=True, cancel_futures=False)
+
             # Commit final cursor
             if self._last_cursor:
                 try:

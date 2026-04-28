@@ -201,6 +201,62 @@ def init_db():
     conn.close()
 
 
+def insert_event_txn(conn, event_uri: str, ctime: Union[str, int, float, datetime.datetime], author: str, raw: dict):
+    """Transaction-scoped insert/update of an event. Uses passed conn, does not commit.
+
+    See insert_event() for behavior. Caller is responsible for transaction control.
+    """
+    raw_json = json.dumps(raw)
+    ctime_dt = timeutil.to_utc_datetime(ctime)
+
+    cur = conn.execute("SELECT raw, ctime FROM events WHERE event_uri = ?", (event_uri,)).fetchall()
+    if not cur:
+        conn.execute(
+            "INSERT INTO events VALUES (?, ?, ?, ?)",
+            (event_uri, ctime_dt.isoformat(), author, raw_json),
+        )
+        # schedule recheck for thread root
+        root = raw.get("replyRootUri") or raw.get("replyParentUri") or event_uri
+        _add_recheck_txn(conn, root)
+        # add claim history entry if this looks like a claim post
+        try:
+            from .claims import add_claim_history_txn, evidence_hash_from_raw
+            text = raw.get("text")
+            if text:
+                evidence_hash = evidence_hash_from_raw(raw)
+                add_claim_history_txn(conn, author, text, ctime_dt.isoformat(), event_uri, raw.get("cid"), None, None, evidence_hash)
+        except Exception:
+            pass
+        return (True, False)
+
+    existing_raw = cur[0][0]
+    if existing_raw != raw_json:
+        now = timeutil.now_utc().isoformat()
+        conn.execute(
+            "INSERT INTO event_versions VALUES (?, ?, ?)",
+            (event_uri, now, existing_raw),
+        )
+        conn.execute(
+            "UPDATE events SET raw = ?, ctime = ?, author = ? WHERE event_uri = ?",
+            (raw_json, ctime_dt.isoformat(), author, event_uri),
+        )
+        # schedule recheck for thread root
+        root = raw.get("replyRootUri") or raw.get("replyParentUri") or event_uri
+        _add_recheck_txn(conn, root)
+        # on update, also append new claim history version if text changed
+        try:
+            from .claims import add_claim_history_txn, evidence_hash_from_raw
+            text = raw.get("text")
+            if text:
+                evidence_hash = evidence_hash_from_raw(raw)
+                add_claim_history_txn(conn, author, text, ctime_dt.isoformat(), event_uri, raw.get("cid"), None, None, evidence_hash)
+        except Exception:
+            pass
+        return (False, True)
+
+    return (False, False)
+
+
 def insert_event(event_uri: str, ctime: Union[str, int, float, datetime.datetime], author: str, raw: dict):
     """Insert or update an event.
 
@@ -210,68 +266,16 @@ def insert_event(event_uri: str, ctime: Union[str, int, float, datetime.datetime
     Returns a tuple (inserted: bool, updated: bool)
     """
     conn = get_conn()
-    raw_json = json.dumps(raw)
-    ctime_dt = timeutil.to_utc_datetime(ctime)
-
-    # check if exists
-    cur = conn.execute("SELECT raw, ctime FROM events WHERE event_uri = ?", (event_uri,)).fetchall()
-    if not cur:
-        conn.execute(
-            "INSERT INTO events VALUES (?, ?, ?, ?)",
-            (event_uri, ctime_dt.isoformat(), author, raw_json),
-        )
+    try:
+        result = insert_event_txn(conn, event_uri, ctime, author, raw)
         conn.commit()
-        # schedule recheck for thread root
-        root = raw.get("replyRootUri") or raw.get("replyParentUri") or event_uri
-        _add_recheck(conn, root)
-        # add claim history entry if this looks like a claim post
-        try:
-            from .claims import add_claim_history, evidence_hash_from_raw
-            text = raw.get("text")
-            if text:
-                evidence_hash = evidence_hash_from_raw(raw)
-                add_claim_history(author, text, ctime.isoformat(), event_uri, raw.get("cid"), None, None, evidence_hash)
-        except Exception:
-            pass
+        return result
+    finally:
         conn.close()
-        return (True, False)
-
-    # existing: compare raw
-    existing_raw = cur[0][0]
-    if existing_raw != raw_json:
-        now = timeutil.now_utc().isoformat()
-        # store previous version
-        conn.execute(
-            "INSERT INTO event_versions VALUES (?, ?, ?)",
-            (event_uri, now, existing_raw),
-        )
-        # update events table
-        conn.execute(
-            "UPDATE events SET raw = ?, ctime = ?, author = ? WHERE event_uri = ?",
-            (raw_json, ctime_dt.isoformat(), author, event_uri),
-        )
-        conn.commit()
-        # schedule recheck for thread root
-        root = raw.get("replyRootUri") or raw.get("replyParentUri") or event_uri
-        _add_recheck(conn, root)
-        # on update, also append new claim history version if text changed
-        try:
-            from .claims import add_claim_history, evidence_hash_from_raw
-            text = raw.get("text")
-            if text:
-                evidence_hash = evidence_hash_from_raw(raw)
-                add_claim_history(author, text, ctime.isoformat(), event_uri, raw.get("cid"), None, None, evidence_hash)
-        except Exception:
-            pass
-        conn.close()
-        return (False, True)
-
-    # identical payload -> no-op
-    conn.close()
-    return (False, False)
 
 
-def _add_recheck(conn, root_uri: str):
+def _add_recheck_txn(conn, root_uri: str):
+    """Transaction-scoped recheck enqueue. Uses passed conn, does not commit."""
     now = timeutil.now_utc().isoformat()
     # Best-effort: enqueue in Redis-backed queue if available; otherwise persist in DB queue
     try:
@@ -299,7 +303,21 @@ def _add_recheck(conn, root_uri: str):
         "UPDATE recheck_requests SET scheduled_at = ? WHERE root_uri = ?",
         (now, root_uri),
     )
+
+
+def _add_recheck(conn, root_uri: str):
+    """Enqueue a recheck for a thread root and commit on the given conn."""
+    _add_recheck_txn(conn, root_uri)
     conn.commit()
+
+
+def insert_edges_txn(conn, edges):
+    """Transaction-scoped edge insert. Uses passed conn, does not commit."""
+    if not edges:
+        return
+    conn.executemany(
+        "INSERT INTO edges VALUES (?, ?, ?, ?)", edges
+    )
 
 
 def insert_edges(edges):
@@ -307,11 +325,11 @@ def insert_edges(edges):
     if not edges:
         return
     conn = get_conn()
-    conn.executemany(
-        "INSERT INTO edges VALUES (?, ?, ?, ?)", edges
-    )
-    conn.commit()
-    conn.close()
+    try:
+        insert_edges_txn(conn, edges)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def upsert_cursor(consumer: str, cursor: Optional[str]):

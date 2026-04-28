@@ -294,17 +294,25 @@ def evidence_hash_from_signals(text: str, external_links: list, embeds: list, fa
     return hashlib.sha256(j.encode("utf-8")).hexdigest()[:16]
 
 
-def add_claim_history(authorDid: str, text: str, createdAt: str, post_uri: str, post_cid: Optional[str] = None, confidence: Optional[float] = None, provenance: Optional[str] = None, evidence_hash: Optional[str] = None):
+def add_claim_history_txn(conn, authorDid: str, text: str, createdAt: str, post_uri: str, post_cid: Optional[str] = None, confidence: Optional[float] = None, provenance: Optional[str] = None, evidence_hash: Optional[str] = None):
+    """Transaction-scoped insert: uses the passed conn, does not commit or close."""
     fp = fingerprint_text(text)
     createdAt = timeutil.to_utc_iso(createdAt)
-    conn = get_conn()
     conn.execute(
         "INSERT INTO claim_history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (authorDid, fp, createdAt, confidence, provenance or "", evidence_hash or "", post_uri, post_cid or "", FP_VERSION),
     )
-    conn.commit()
-    conn.close()
     return fp
+
+
+def add_claim_history(authorDid: str, text: str, createdAt: str, post_uri: str, post_cid: Optional[str] = None, confidence: Optional[float] = None, provenance: Optional[str] = None, evidence_hash: Optional[str] = None):
+    conn = get_conn()
+    try:
+        fp = add_claim_history_txn(conn, authorDid, text, createdAt, post_uri, post_cid, confidence, provenance, evidence_hash)
+        conn.commit()
+        return fp
+    finally:
+        conn.close()
 
 
 def evidence_hash_from_raw(raw: dict) -> str:
