@@ -63,6 +63,45 @@ A degraded window is not closed by a clean snapshot. The labeler (or its operato
 
 A patch that restores throughput is not the same as a recovery proof. The degraded window stays open until the criteria-with-horizon are met, regardless of how clean the patch was.
 
+## 6. Coverage honesty: the bucket vocabulary
+
+A green recovery signal is **structurally inadmissible** if any known shedding path has no instrumented loss bucket, OR has a bucket that is currently zero only because the path isn't being exercised.
+
+Health metrics are conditional admissions about *observed* buckets, not unconditional claims about reality. When a labeler fixes one shedding mechanism, throughput pressure typically migrates to whatever the next-narrowest constraint is. If the new shedding path wasn't instrumented when the original health metric was designed, the metric becomes a green light that the loss has *moved*, not stopped.
+
+The reference labeler exposes `dropped` (queue-overflow shedding). A serious labeler under load may also discover:
+
+- **Lock-conflict shedding** — a writer batch fails with `database is locked`; the rollback path drops events. Must surface as a `rollback_lost` (or equivalent) counter, summed into `drop_frac` for `platform_health` purposes.
+- **Writer-thread starvation** — a single-threaded writer occupied by maintenance work cannot drain the ingest queue; `put_nowait` drops events. The bucket is the existing `dropped` counter, but the *cause* is internal scheduling, not upstream pressure. Surface chunk wall-times or maintenance-occupancy stats so the cause is diagnosable.
+
+**Operational rule.** Before stamping recovery: enumerate every known shedding path and confirm each has an instrumented bucket. When recovery is reaffirmed, re-ask: what shedding paths exist now that weren't instrumented when this signal was designed? Recovery is parole, not exoneration.
+
+This was the load-bearing failure in driftwatch's 2026-04-29 stamp: `drop_frac=0.0` sustained 27h, but the lock-conflict rollback path's loss surfaced only as `LOG.exception` lines that didn't aggregate. See `JETSTREAM_INGEST_REALITIES.md` for the case study and `specs/gaps/gap-spec-single-writer-invariant.md` for the architectural follow-up.
+
+## 7. Maintenance shares the write contract
+
+**Maintenance is mutation.** Retention, archive deletion, schema migration, WAL truncation, host-side cron writes — all subject to the same write-lock arbitration as ingest. "Background job" is not an immunity from the lock contest.
+
+Two failure shapes the reference labeler implementer should know about:
+
+1. **Maintenance on its own write connection** competes with the persistent ingest writer for SQLite's single write lock. Under load, contests can result in `database is locked` rollbacks for either side. Driftwatch lost ~444 events in 24h to this in 2026-04-30 before the rollback bucket was instrumented (see invariant 6).
+
+2. **Naively routing maintenance through the ingest writer thread** eliminates the lock contest but introduces a worse failure: a long maintenance chunk (e.g. a multi-second `DELETE` of 5000 rows) blocks the writer thread, the ingest queue overflows, events drop. Driftwatch attempted this fix at commit `5850d01` and **failed acceptance under firehose load** — `drop_frac=67%`, no retention pass completed in 2.5h, and the rollback bucket showed zero (because shedding had migrated back to plain `QueueFull`).
+
+**The doctrine that survived:**
+
+> Single-writer is necessary but **insufficient**. Maintenance routed through the writer must be **prioritized, bounded, resumable, and preemptable**. The naive version failed by replacing lock-conflict loss with writer-thread starvation.
+
+What that requires concretely:
+
+- Ingest work has priority over maintenance work.
+- Maintenance is chunked, with bounded wall-time per chunk (small enough that one chunk's writer-occupancy is shorter than the time it takes the ingest queue to fill at peak rate).
+- Maintenance yields to ingest pressure (pre-chunk gate on backlog/queue-depth).
+- Maintenance progress is checkpointable so it can resume after preemption.
+- Maintenance pauses entirely under sustained ingest pressure rather than starve ingest.
+
+Until a labeler implements this scheduling layer, the safe state is **maintenance on its own connection** (accepting the lock-conflict shedding from invariant 6 — at least it's instrumented) rather than naive routing through the writer thread. Don't confuse serialization with scheduling.
+
 ## What this rules out
 
 A reference labeler implementation **may not**:
