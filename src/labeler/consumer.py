@@ -53,6 +53,15 @@ QUEUE_MAX = 5000
 BATCH_MAX_EVENTS = int(os.getenv("BATCH_MAX_EVENTS", "100"))
 BATCH_MAX_WAIT_S = float(os.getenv("BATCH_MAX_WAIT_S", "0.25"))
 
+# Writer-owned WAL truncate. The persistent writer thread calls
+# wal_checkpoint(TRUNCATE) on its own connection right after a successful
+# commit — that's the cleanest moment to attempt a WAL restart, since the
+# writer just released its frame and is least likely to be racing readers
+# (auto-checkpoint at 1000 frames is PASSIVE only and never truncates).
+# Rate-limited so per-batch overhead is bounded. See INGEST_INVARIANTS
+# section 6 for the bucket-vocabulary doctrine that motivates this.
+WAL_TRUNCATE_INTERVAL_S = float(os.getenv("WAL_TRUNCATE_INTERVAL_S", "30"))
+
 
 def _build_ws_url(base_url: str, cursor: Optional[str] = None) -> str:
     """Append wantedCollections and optional cursor to the Jetstream URL."""
@@ -186,6 +195,14 @@ class ATProtoConsumer:
             max_workers=1, thread_name_prefix="lbl-writer"
         )
         self._writer_conn = None  # lazily opened inside the writer thread
+        self._last_wal_truncate_mono = 0.0  # writer thread only
+        # Counts events shed by the writer when a batch hits a write-lock
+        # conflict (e.g. retention or another connection holding the lock)
+        # and rolls back. Tracked alongside _dropped so a future health
+        # surface can sum both into intake-loss accounting — a green
+        # recovery flag must not hide lock-conflict shedding (see
+        # INGEST_INVARIANTS section 6).
+        self._rollback_lost = 0  # main thread only
 
     def _get_writer_conn(self):
         """Return the persistent writer connection, opening it on first call.
@@ -202,10 +219,12 @@ class ATProtoConsumer:
         One transaction, one commit per batch. On any exception, rolls back
         the entire batch — we'd rather lose a batch than half-write it.
 
-        Returns (written, inserted_delta, updated_delta).
+        Returns (written, inserted_delta, updated_delta, lost). ``lost`` is
+        non-zero only when the batch failed; it must count against intake
+        health so a recovery gate can't hide lock-conflict shedding.
         """
         if not batch:
-            return (0, 0, 0)
+            return (0, 0, 0, 0)
         conn = self._get_writer_conn()
         inserted_delta = 0
         updated_delta = 0
@@ -222,14 +241,45 @@ class ATProtoConsumer:
                 edges = extract_edges_from_event(ev)
                 insert_edges_txn(conn, edges)
             conn.commit()
-            return (len(batch), inserted_delta, updated_delta)
+            self._maybe_wal_truncate(conn)
+            return (len(batch), inserted_delta, updated_delta, 0)
         except Exception:
             try:
                 conn.rollback()
             except Exception:
                 LOG.exception("rollback failed after batch error")
             LOG.exception("batch failed; rolled back %d events", len(batch))
-            return (0, 0, 0)
+            return (0, 0, 0, len(batch))
+
+    def _maybe_wal_truncate(self, conn):
+        """Attempt PRAGMA wal_checkpoint(TRUNCATE) from the writer thread.
+
+        Called only from inside _process_batch after a successful commit —
+        the writer just released its frame, the least racy moment to
+        attempt a WAL restart. Auto-checkpoint at 1000 frames is PASSIVE
+        only (frames flush to main DB but the WAL file itself never
+        shrinks); without an explicit TRUNCATE the WAL grows to its
+        high-water mark and stays. Rate-limited so the cost is bounded.
+
+        Logs only when the result is interesting (busy or non-trivial work
+        done); silent on the typical no-op case.
+        """
+        now = time.monotonic()
+        if now - self._last_wal_truncate_mono < WAL_TRUNCATE_INTERVAL_S:
+            return
+        self._last_wal_truncate_mono = now
+        try:
+            row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if not row:
+                return
+            busy, log, ckpt = row
+            if busy or log >= 1000:
+                LOG.info(
+                    "wal_truncate: busy=%d log=%d checkpointed=%d",
+                    busy, log, ckpt,
+                )
+        except Exception:
+            LOG.debug("wal_truncate failed", exc_info=True)
 
     async def _drain_queue(self):
         """Background task: drain event queue in batches without blocking WS read.
@@ -288,13 +338,18 @@ class ATProtoConsumer:
                         break
 
             try:
-                written, inserted_delta, updated_delta = await loop.run_in_executor(
+                written, inserted_delta, updated_delta, lost = await loop.run_in_executor(
                     self._writer_executor, self._process_batch, batch
                 )
             except Exception:
                 self._errors += 1
                 LOG.exception("failed to process batch")
-                written, inserted_delta, updated_delta = 0, 0, 0
+                written, inserted_delta, updated_delta, lost = 0, 0, 0, 0
+
+            if lost:
+                # Database-locked rollbacks are intake loss — surface them
+                # in STATS so they cannot hide behind a green recovery flag.
+                self._rollback_lost += lost
 
             if written:
                 self._msgs += written
@@ -320,10 +375,10 @@ class ATProtoConsumer:
             backlog = self._event_queue.qsize()
             LOG.info(
                 "STATS msgs=%d inserts=%d updates=%d errors=%d "
-                "dropped=%d reconnects=%d backlog=%d uptime=%ds",
+                "dropped=%d rollback_lost=%d reconnects=%d backlog=%d uptime=%ds",
                 self._msgs, self._inserts, self._updates,
-                self._errors, self._dropped, self._reconnects,
-                backlog, uptime,
+                self._errors, self._dropped, self._rollback_lost,
+                self._reconnects, backlog, uptime,
             )
 
     async def _handle_message(self, raw: str):
@@ -451,9 +506,9 @@ class ATProtoConsumer:
                     LOG.exception("failed to commit cursor on shutdown")
             LOG.info(
                 "consumer stopped. msgs=%d inserts=%d updates=%d "
-                "errors=%d dropped=%d",
+                "errors=%d dropped=%d rollback_lost=%d",
                 self._msgs, self._inserts, self._updates,
-                self._errors, self._dropped,
+                self._errors, self._dropped, self._rollback_lost,
             )
 
     def _handle_signal(self):
