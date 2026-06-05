@@ -187,9 +187,9 @@ class TestBatchLoop:
 # -------------------------------------------------------------------
 class TestOverlapHourly:
     def test_no_double_counting(self, tmp_path):
-        now_ts = _ts(0)
+        ts = _ts(-1)  # 1h ago, safely within overlap window
         rows = [
-            ("did:a", "fp1", now_ts, None, "", "", "at://did:a/post/1", "cid1", "v1"),
+            ("did:a", "fp1", ts, None, "", "", "at://did:a/post/1", "cid1", "v1"),
         ]
         source = _make_source(rows)
         facts_path = str(tmp_path / "facts.sqlite")
