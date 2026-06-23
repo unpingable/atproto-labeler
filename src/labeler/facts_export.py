@@ -3,6 +3,17 @@
 Output: /app/data/facts.sqlite (container) = /opt/driftwatch/deploy/data/facts.sqlite (host)
 
 Strategy: copy-forward existing sidecar → tmp, update incrementally, prune, atomic replace.
+
+Caveat — this is an OBSERVATION export, not a canonical-authority surface.
+The sidecar carries what this labeler *observed* (fingerprint aggregates, URI
+fingerprints): evidence for a downstream consumer to reason over, never a claim
+of label truth or derived authority. A consumer must treat these rows as
+testimony to be admitted under its own discipline, not as a settled verdict to
+relay. Keep the provenance separation clean: observation is exported here;
+derivation and interpretation/action belong to the consumer, downstream of this
+boundary. Do not add "this subject IS X" judgments or any emit-back path to this
+exporter — that would collapse the observer/combatant boundary the detect-only
+default exists to hold.
 """
 
 import asyncio

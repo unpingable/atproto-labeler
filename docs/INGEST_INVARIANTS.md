@@ -78,6 +78,17 @@ The reference labeler exposes `dropped` (queue-overflow shedding). A serious lab
 
 This was the load-bearing failure in driftwatch's 2026-04-29 stamp: `drop_frac=0.0` sustained 27h, but the lock-conflict rollback path's loss surfaced only as `LOG.exception` lines that didn't aggregate. See `JETSTREAM_INGEST_REALITIES.md` for the case study and `specs/gaps/gap-spec-single-writer-invariant.md` for the architectural follow-up.
 
+### Implemented surface: loss counters are health-significant
+
+The reference labeler persists the consumer's intake-loss counters (`rollback_lost`, `dropped`) plus a heartbeat to a single-row `consumer_health` table, written by the consumer's stats loop on its own short-lived connection (the persistent writer / single-writer hot path is never touched, and no `SQLITE_BUSY` retry loop is introduced — the 60s `busy_timeout` is the only wait). `/health/extended` reads that row and returns `status: "degraded"` when `rollback_lost > 0`, `dropped > 0`, or the heartbeat is stale.
+
+Two properties make this honest rather than decorative:
+
+- **The counters are monotonic for the life of the consumer process.** A later successful batch does not decrement them. A consumer that lost a batch at 03:00 and has ingested cleanly since still reports `degraded` — the surface tracks *unaccounted loss*, not *current throughput*. Green recovery is not green epistemics.
+- **There is deliberately no ack/reset surface in this layer.** The only thing that clears the counters is a consumer restart. Defining what "accounted for" means — and giving an operator a way to acknowledge a known loss window — is a separate operator-control surface, not part of the health read. Do not sneak a reset into the health path; a health endpoint that can zero its own degraded signal is back to lying.
+
+A stale heartbeat (no update within `HEALTH_HEARTBEAT_STALE_S`, default 3× the stats interval) is itself degraded: a consumer that has stopped heartbeating is not a consumer that is fine. An absent row (no consumer has ever run in this deployment) is reported as `consumer: null` and does not force `degraded`, since the consumer may simply not be part of that process group.
+
 ## 7. Maintenance shares the write contract
 
 **Maintenance is mutation.** Retention, archive deletion, schema migration, WAL truncation, host-side cron writes — all subject to the same write-lock arbitration as ingest. "Background job" is not an immunity from the lock contest.

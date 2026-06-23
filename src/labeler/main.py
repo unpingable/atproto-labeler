@@ -1,13 +1,31 @@
 import os
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response, Depends, Header
-from .db import init_db, get_conn
+from .db import init_db, get_conn, get_consumer_health
 from .consumer import ATProtoConsumer
+from . import timeutil
 import asyncio
 import json
 import logging
 
 app = FastAPI(title="Bluesky Labeler MVP")
+
+# A consumer heartbeat older than this is treated as stale (consumer stalled or
+# died). Must exceed the consumer's stats interval (default 60s) with margin;
+# default 3x.
+HEARTBEAT_STALE_S = float(os.getenv("HEALTH_HEARTBEAT_STALE_S", "180"))
+
+
+def _heartbeat_is_stale(updated_at_iso) -> bool:
+    """True when a persisted heartbeat is missing or older than the threshold."""
+    if not updated_at_iso:
+        return True
+    try:
+        ts = timeutil.to_utc_datetime(updated_at_iso)
+        age = (timeutil.now_utc() - ts).total_seconds()
+        return age > HEARTBEAT_STALE_S
+    except Exception:
+        return True
 
 _consumer_task = None
 _label_ingest_task = None
@@ -103,12 +121,34 @@ async def health_extended():
     if cursor_rows:
         cursor_info = {"consumer": cursor_rows[0][0], "cursor": cursor_rows[0][1], "updated_at": cursor_rows[0][2]}
     disk = check_disk()
+
+    # Intake-loss accounting: a consumer that rolled back batches (lock
+    # conflicts) or dropped events (queue full) is epistemically degraded even
+    # if the process recovered and is happily ingesting now. Surface it here so
+    # the health status cannot read clean "ok" merely because of recovery.
+    # Counters are unaccounted loss; they only clear when the consumer process
+    # restarts (no ack/reset surface — that is a separate operator control).
+    status = "ok"
+    consumer_block = None
+    health = get_consumer_health()
+    if health is not None:
+        heartbeat_stale = _heartbeat_is_stale(health["updated_at"])
+        consumer_block = {
+            "updated_at": health["updated_at"],
+            "rollback_lost": health["rollback_lost"],
+            "dropped": health["dropped"],
+            "heartbeat_stale": heartbeat_stale,
+        }
+        if health["rollback_lost"] > 0 or health["dropped"] > 0 or heartbeat_stale:
+            status = "degraded"
+
     return {
-        "status": "ok",
+        "status": status,
         "emit_mode": get_emit_mode(),
         "queue_depth": queue_depth,
         "last_cursor": cursor_info,
         "quarantine_trips": quarantine_trips,
+        "consumer": consumer_block,
         "disk": disk,
         "disk_pressure": is_disk_pressure(),
     }

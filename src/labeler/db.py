@@ -103,6 +103,23 @@ def init_db():
         """
     )
 
+    # consumer_health: single row per consumer, periodically heartbeated by the
+    # consumer's stats loop. Lets /health/extended surface intake-loss
+    # accounting out-of-process — the loss counters live on the consumer object
+    # (in-memory, in the consumer process) and would otherwise be visible only
+    # in the STATS log line. A health surface that returns "ok" while
+    # rollback_lost climbs is false-green; see docs/INGEST_INVARIANTS.md.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS consumer_health (
+            consumer TEXT PRIMARY KEY,
+            updated_at TIMESTAMP,
+            rollback_lost INTEGER,
+            dropped INTEGER
+        )
+        """
+    )
+
     # store historical versions of events when they are edited
     conn.execute(
         """
@@ -357,6 +374,61 @@ def get_cursor(consumer: str) -> Optional[str]:
     if not cur:
         return None
     return cur[0][0]
+
+
+def upsert_consumer_health(consumer: str, rollback_lost: int, dropped: int):
+    """Persist the consumer's intake-loss counters + a fresh heartbeat.
+
+    Written periodically by the consumer's stats loop (low frequency, like
+    cursor saves) on a short-lived connection — it does NOT touch the
+    persistent writer connection, so the single-writer hot path is untouched
+    and no SQLITE_BUSY retry loop is introduced (the 60s busy_timeout is the
+    only wait). The counters are monotonic for the life of the consumer
+    process: a later successful batch must not zero them, so a green recovery
+    cannot mask earlier unaccounted loss.
+    """
+    conn = get_conn()
+    now = timeutil.now_utc().isoformat()
+    cur = conn.execute("SELECT 1 FROM consumer_health WHERE consumer = ?", (consumer,)).fetchall()
+    if cur:
+        conn.execute(
+            "UPDATE consumer_health SET updated_at = ?, rollback_lost = ?, dropped = ? WHERE consumer = ?",
+            (now, int(rollback_lost), int(dropped), consumer),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO consumer_health VALUES (?, ?, ?, ?)",
+            (consumer, now, int(rollback_lost), int(dropped)),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_consumer_health(consumer: Optional[str] = None) -> Optional[dict]:
+    """Return the latest persisted consumer health row, or None if absent.
+
+    With no consumer name, returns the most-recently-heartbeated row.
+    """
+    conn = get_conn()
+    if consumer is None:
+        rows = conn.execute(
+            "SELECT consumer, updated_at, rollback_lost, dropped FROM consumer_health ORDER BY updated_at DESC LIMIT 1"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT consumer, updated_at, rollback_lost, dropped FROM consumer_health WHERE consumer = ?",
+            (consumer,),
+        ).fetchall()
+    conn.close()
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "consumer": r[0],
+        "updated_at": r[1],
+        "rollback_lost": r[2] or 0,
+        "dropped": r[3] or 0,
+    }
 
 
 def insert_label(subject_uri: str, labeler_did: str, label: dict, ctime: Optional[str] = None, endpoint: Optional[str] = None) -> bool:

@@ -23,7 +23,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 import websockets
-from .db import insert_event, insert_edges, insert_event_txn, insert_edges_txn, init_db, upsert_cursor, get_cursor, get_conn
+from .db import insert_event, insert_edges, insert_event_txn, insert_edges_txn, init_db, upsert_cursor, get_cursor, get_conn, upsert_consumer_health
 from .extractor import extract_edges_from_event
 from . import timeutil
 
@@ -368,7 +368,8 @@ class ATProtoConsumer:
                         LOG.exception("failed to save cursor")
 
     async def _stats_loop(self):
-        """Emit periodic STATS line to stderr."""
+        """Emit periodic STATS line to stderr and persist a health heartbeat."""
+        loop = asyncio.get_running_loop()
         while not self._stop:
             await asyncio.sleep(STATS_INTERVAL_S)
             uptime = int(time.monotonic() - self._started_at)
@@ -380,6 +381,20 @@ class ATProtoConsumer:
                 self._errors, self._dropped, self._rollback_lost,
                 self._reconnects, backlog, uptime,
             )
+            # Persist intake-loss counters + heartbeat so /health/extended can
+            # report degraded out-of-process. Written on the default executor
+            # (fresh short-lived conn, like cursor saves) so the persistent
+            # writer conn / single-writer hot path is never touched.
+            await self._persist_health(loop)
+
+    async def _persist_health(self, loop):
+        try:
+            await loop.run_in_executor(
+                None, upsert_consumer_health,
+                CONSUMER_NAME, self._rollback_lost, self._dropped,
+            )
+        except Exception:
+            LOG.exception("failed to persist consumer health")
 
     async def _handle_message(self, raw: str):
         try:
@@ -421,6 +436,13 @@ class ATProtoConsumer:
         """Connect to Jetstream and process messages with reconnect resilience."""
         init_db()
         saved_cursor = get_cursor(CONSUMER_NAME)
+        # Establish a health row immediately so /health/extended can tell a
+        # running-but-idle consumer (fresh heartbeat, zero loss) apart from a
+        # crashed or never-started one (absent/stale heartbeat).
+        try:
+            upsert_consumer_health(CONSUMER_NAME, self._rollback_lost, self._dropped)
+        except Exception:
+            LOG.exception("failed to write initial consumer health heartbeat")
         LOG.info(
             "starting Jetstream consumer, collections=%s cursor=%s",
             WANTED_COLLECTIONS, saved_cursor,
