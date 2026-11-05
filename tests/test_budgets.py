@@ -3,6 +3,7 @@ pytest.importorskip("duckdb")
 
 from labeler.budgets import parse_rule_budgets, budget_exceeded_in_run
 from labeler.db import init_db, get_conn
+from labeler import timeutil
 
 
 def test_parse_rule_budgets(monkeypatch):
@@ -26,7 +27,7 @@ def test_budget_window_query(monkeypatch):
         "INSERT INTO label_decisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "d1",
-            "2026-01-30T00:00:00+00:00",
+            timeutil.now_utc().isoformat(),
             "uri:1",
             "root:1",
             "label",

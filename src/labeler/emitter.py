@@ -36,13 +36,10 @@ def record_emit_decision(labels: List[dict], mode: str, audit_path: str = None) 
     path = emit_labels_to_audit(recs, audit_path=audit_path)
     if status == "suppressed":
         for rec in recs:
-            try:
-                insert_quarantine_emit(
-                    emit_mode=mode_norm,
-                    emit_status=status,
-                    emit_reason=rec.get("emit_reason", ""),
-                    payload=rec,
-                )
-            except Exception:
-                pass
+            insert_quarantine_emit(
+                emit_mode=mode_norm,
+                emit_status=status,
+                emit_reason=rec.get("emit_reason", ""),
+                payload=rec,
+            )
     return path, status

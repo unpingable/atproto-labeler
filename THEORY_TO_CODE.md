@@ -1,5 +1,9 @@
 # Theory → Code
 
+> Parked research material. This is not a development commitment or an implemented
+> service contract. The [README](README.md) and [closeout](docs/CLOSEOUT-2026-11-05.md)
+> define the verified offline scope and limitations.
+
 Mapping from governance concepts to source locations. Not exhaustive — just
 enough to navigate.
 

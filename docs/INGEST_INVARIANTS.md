@@ -1,5 +1,12 @@
 # Ingest Invariants
 
+> Historical research doctrine, superseded as a runtime claim by the
+> [parked offline contract](../README.md) and [closeout](CLOSEOUT-2026-11-05.md).
+> The statements below describe intended operating requirements, not qualified
+> behavior of this source. In particular, received-cursor persistence, queue
+> acknowledgment, shutdown draining, durable lifetime loss totals and recovery
+> are unqualified. Do not launch a live source to exercise this document.
+
 A reference labeler is a **loss-sensitive stream consumer**, not a websocket inspection script.
 
 This doc states the non-negotiable behaviors any serious labeler implementation must implement. The reference code in `src/labeler/consumer.py`, `src/labeler/db.py`, and `src/labeler/claims.py` exists to demonstrate these invariants. If a derived implementation violates one of them, it is not a labeler — it is a self-shedding fiction with JSON output.

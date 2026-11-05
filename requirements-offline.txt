@@ -1,0 +1,12 @@
+# Available closeout environment, CPython 3.12.3; SQLite is from Python.
+# Separate from unqualified historical full-service requirements.txt.
+fastapi==0.101.1
+starlette==0.27.0
+pydantic==2.13.4
+anyio==4.14.2
+httpx==0.24.1
+uvicorn==0.22.0
+websockets==11.0.3
+prometheus-client==0.17.0
+pytest==7.4.0
+pytest-asyncio==0.22.0

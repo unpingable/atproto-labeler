@@ -161,7 +161,9 @@ def recheck_once(limit: int = 100) -> int:
                             pass
 
             # For each subject, compare current active labels to labels_by_subject
+            posts_by_uri = {post.uri: post for post in posts}
             for subj, labs in labels_by_subject.items():
+                p = posts_by_uri[subj]
                 # names of labels that should be active according to rules
                 desired_names = set(l.label for l in labs)
 
@@ -194,7 +196,7 @@ def recheck_once(limit: int = 100) -> int:
                         "rule_id": l.rule_id or "unknown",
                         "scheduler": "thread_root",
                     }
-                    inserted = insert_label(subj, DRIFT_LABELER_DID, label_obj)
+                    inserted = insert_label(subj, DRIFT_LABELER_DID, label_obj, record_decision=False)
                     if inserted:
                         metrics_module.RECHECK_LABELS_INSERTED.inc()
                         emit_buffer.append(
@@ -287,7 +289,7 @@ def recheck_once(limit: int = 100) -> int:
                             "rule_id": l.rule_id or "unknown",
                             "scheduler": "claim_group",
                         }
-                        inserted = insert_label(p.uri, DRIFT_LABELER_DID, label_obj)
+                        inserted = insert_label(p.uri, DRIFT_LABELER_DID, label_obj, record_decision=False)
                         if inserted:
                             metrics_module.RECHECK_LABELS_INSERTED.inc()
                             emit_buffer.append(

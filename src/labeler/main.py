@@ -1,4 +1,5 @@
 import os
+import secrets
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response, Depends, Header
 from .db import init_db, get_conn, get_consumer_health
@@ -35,6 +36,8 @@ LOG = logging.getLogger("labeler.main")
 
 @app.on_event("startup")
 async def startup_event():
+    if os.getenv("FIREHOSE_AUTO_START") == "1":
+        raise RuntimeError("live ingestion is unqualified in this parked offline reference")
     init_db()
 
     # Run preflight checks
@@ -167,18 +170,14 @@ async def health_preflight():
 
 
 async def admin_auth(authorization: str = Header(None), x_admin_token: str = Header(None, alias="X-Admin-Token")):
-    """Require ADMIN_API_TOKEN if set; accept either Bearer token in Authorization header
-    or the `X-Admin-Token` header. If `ADMIN_API_TOKEN` is not set, authentication is a no-op.
-    """
+    """Fail closed unless a configured token matches a supported header."""
     log = logging.getLogger("labeler.admin")
     token = os.getenv("ADMIN_API_TOKEN")
     if not token:
-        # no admin token configured → open endpoint (warning for operators)
-        log.debug("admin auth: no ADMIN_API_TOKEN configured; allowing open access")
-        return True
+        raise HTTPException(status_code=503, detail="admin access disabled: token not configured")
 
     # Check X-Admin-Token first
-    if x_admin_token and x_admin_token == token:
+    if x_admin_token and secrets.compare_digest(x_admin_token.encode(), token.encode()):
         return True
 
     if not authorization:
@@ -186,7 +185,7 @@ async def admin_auth(authorization: str = Header(None), x_admin_token: str = Hea
         raise HTTPException(status_code=401, detail="missing admin token")
 
     scheme, _, cred = authorization.partition(" ")
-    if scheme.lower() != "bearer" or cred != token:
+    if scheme.lower() != "bearer" or not secrets.compare_digest(cred.encode(), token.encode()):
         log.warning("admin auth failed: invalid token provided (scheme=%s)", scheme)
         raise HTTPException(status_code=401, detail="invalid admin token")
 
@@ -225,24 +224,27 @@ async def admin_cooldowns(auth=Depends(admin_auth)):
 
 
 @app.get("/exposure/{did}")
-async def exposure(did: str):
+async def exposure(did: str, auth=Depends(admin_auth)):
     # naive exposure: count edges where dst_did == did
     conn = get_conn()
     rows = conn.execute("SELECT count(*) FROM edges WHERE dst_did = ?", (did,)).fetchall()
     count = rows[0][0] if rows else 0
+    conn.close()
     return {"did": did, "incoming_edges": count}
 
 
 @app.get("/strain/top")
-async def strain_top(limit: int = 10):
+async def strain_top(limit: int = 10, auth=Depends(admin_auth)):
+    limit = max(1, min(int(limit), 500))
     # placeholder: return top authors by event count (proxy metric)
     conn = get_conn()
     rows = conn.execute("SELECT author, COUNT(*) as cnt FROM events GROUP BY author ORDER BY cnt DESC LIMIT ?", (limit,)).fetchall()
+    conn.close()
     return [{"author": r[0], "count": r[1]} for r in rows]
 
 
 @app.get("/labels/{subject_uri}")
-async def labels_for_subject(subject_uri: str):
+async def labels_for_subject(subject_uri: str, auth=Depends(admin_auth)):
     from .db import get_labels_for_subject
     labels = get_labels_for_subject(subject_uri)
     if not labels:
@@ -328,4 +330,4 @@ async def quarantine_recent(limit: int = 50, auth=Depends(admin_auth)):
 
 if __name__ == "__main__":
     # Allow `python -m labeler.main` for quick local runs
-    uvicorn.run("labeler.main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), log_level="info")
+    uvicorn.run("labeler.main:app", host="127.0.0.1", port=int(os.getenv("PORT", 8000)), log_level="info")

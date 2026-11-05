@@ -1,167 +1,128 @@
-# Bluesky Labeler (Reference Implementation)
+# Governed labeler: parked offline reference
 
-A governed ATProto labeler with drift detection, longitudinal tracking, and a
-decision ledger. Built as a reference implementation — not a production service,
-but a demonstration of patterns that auditable labelers should adopt.
+**PARKED WITH KNOWN LIMITATIONS.** This research artifact demonstrates synthetic
+evidence → decision receipt → suppressed local audit/quarantine. It is not a
+production labeler. No network label publisher is implemented. Development ends
+with this finite closeout; further work requires a new owner decision.
 
-## Why this exists
+[Closing snapshot](https://github.com/unpingable/atproto-labeler/tree/reference-closeout-20261105)
+ · [Closeout and limitations](docs/CLOSEOUT-2026-11-05.md)
+ · [Authorizing issue](https://github.com/unpingable/atproto-labeler/issues/1)
 
-ATProto provides cryptographic provenance: content-addressed CIDs prove **what
-was written**, and DID-based identity proves **who signed it**. What ATProto does
-not provide is governance: why a label was applied, what evidence supported it,
-what regime the decision entered, or how to audit the process after the fact.
+## Reproduce the offline example
 
-Most labelers treat this gap as someone else's problem. This implementation
-treats it as the core problem, and shows what a receipted, auditable labeling
-pipeline looks like in practice.
-
-## What it demonstrates
-
-**Decision ledger.** Every label commit produces a receipt in `label_decisions`
-with rule ID, fingerprint version, input evidence hashes, config hash, and
-decision trace. Labels are not just applied — they are receipted.
-
-**Emit modes (safe by default).** Labeling defaults to detect-only. Emission
-requires explicit opt-in (`LABELER_EMIT_MODE=emit` + `LABELER_EMIT_CONFIRM=true`).
-A quarantine mode suppresses emits while preserving audit records. Per-rule
-activation budgets auto-trip quarantine if a rule spikes beyond its rolling
-window cap.
-
-**Longitudinal tracking.** Claims are fingerprinted and tracked over time by
-`(authorDid, claim_fingerprint)`. Drift rules detect assertiveness increases
-(confidence rises without new evidence) and provenance laundering (attribution
-removed in later edits). Rechecks are scheduled, not ad-hoc.
-
-**Fingerprint stability.** A stability testing CLI runs mutation classes
-(whitespace, punctuation, casefold, URL params, emoji, small edits) against
-fixtures and enforces collision rate, churn rate, and drift thresholds. A
-release rail gates promotion on stability report results.
-
-**Containment without erasure.** Quarantined emits are stored with full payload
-and audit context. Nothing is silently dropped. The quarantine CLI and API
-endpoints allow inspection and release with provenance.
-
-**Operational hardening.** SQLite runs in WAL mode with tuned pragmas
-(busy_timeout, synchronous=NORMAL, cache sizing). A preflight check validates
-DB health, disk space, and core tables at startup. A disk pressure brake pauses
-event processing when usage exceeds thresholds. Retention loops prune old events,
-edges, and claim history in batches to control DB growth. The consumer emits
-periodic STATS lines for observability and handles SIGTERM/SIGINT for graceful
-shutdown with cursor commit.
-
-## Quickstart
+Run these commands on the machine holding this checkout; they launch no server
+and require no DID, account, credential, Redis or Jetstream connection. Dependency
+installation is preparation; the demonstration and acceptance checks run offline.
+The example uses disposable temporary SQLite databases and deletes its own files
+on exit. Do not point it at an operational database.
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 . .venv/bin/activate
-pip install -r requirements.txt
-
-# Run locally
-python -m labeler.main
-
-# Run tests
-pytest -q
+python -m pip install -r requirements-offline.txt
+PYTHONPATH=src python -m labeler.offline_demo
+PYTHONPATH=src python -m pytest -q tests/test_closeout.py
 ```
 
-### Docker Compose (demo)
+The deterministic summary is:
 
-```bash
-docker compose up --build -d
-curl http://localhost:8000/health
-
-# Seed demo events and watch worker + simulated labeler
-docker compose run --rm replay
-docker compose logs -f worker
+```json
+{"budget_mode":"quarantine","detect_mode":"detect-only","dual_gate":"pass","evidence_receipts":"pass","network_attempts":0,"quarantine_restart":"pass","state_loss":"unknown-history","status":"PASS","store_failure":"propagated"}
 ```
 
-The simulated labeler returns 429s for initial requests to exercise retry and
-cooldown behavior. The shared `./data` directory holds the SQLite database.
+JSON spacing is immaterial. UUIDs and receipt timestamps are not asserted to be
+byte-stable. The fixed input is [offline_closeout.jsonl](fixtures/offline_closeout.jsonl).
+The command runs real rules and SQLite writes, verifies receipt input/evidence
+fields, suppression and a zero per-rule budget trip, reads quarantine and health
+state from a fresh interpreter, and checks that a fresh store has no prior
+history. A deliberately unavailable quarantine table must raise an error. A Python
+audit hook rejects network connects, name resolution and datagram sends; the final
+summary requires zero attempts. Nothing is emitted to the network.
 
-## CLI
+Tested: CPython 3.12.3, SQLite 3.45.1; pinned offline test dependencies are in
+[requirements-offline.txt](requirements-offline.txt). This file records the
+available test environment, not a newly resolved lock. Two upstream Pydantic
+compatibility deprecation warnings are expected. The historical full suite and
+`requirements.txt` are **not qualified**; see the exact failures in the closeout.
 
-```bash
-# Quarantine inspection
-python -m labeler.cli quarantine list --limit 50
-python -m labeler.cli quarantine show <emit_id>
+## Implemented behavior and authority
 
-# Fingerprint stability testing
-python -m labeler.cli stability-test --input fixtures/fingerprint_extended.jsonl --out out/stability_report.json
+- `LABELER_EMIT_MODE` defaults to `detect-only`; unknown modes also resolve there.
+  `emit` requires `LABELER_EMIT_CONFIRM=true` (also accepts `1`/`yes`). All modes
+  only write local JSONL. The legacy `emitted` status means local audit selection,
+  not publication or remote acceptance. Direct Python callers can pass an explicit
+  mode to the recorder; they are trusted code, not an authenticated API.
+- Suppressed payloads are also stored in SQLite `quarantine_emits`. Failure now
+  propagates from the recorder. File and database writes are separate, so partial
+  output remains possible. The legacy recheck wrapper still catches recorder
+  failures; the demo detects missing receipts/quarantine rather than trusting it.
+- Thread-root rechecks record evidence for the subject being labeled, rather than
+  the last post in the thread. The prior duplicate empty receipt is suppressed on
+  this path. Label, detailed receipt and quarantine writes are separate commits;
+  they do **not** provide atomic governed commitment under failure.
+- Per-rule caps (`LABELER_RULE_BUDGETS`, e.g. `provenance_laundering:0`) trip local
+  quarantine when counts exceed a cap. Unspecified rules are uncapped. Malformed
+  budget entries are ignored; this is not a fail-closed policy engine.
+- Admin and per-subject HTTP routes reject an unset `ADMIN_API_TOKEN` with 503;
+  missing/wrong credentials with a configured token return 401. Correct
+  `Authorization: Bearer …` or `X-Admin-Token` permits access. Protected routes:
+  `/admin/mappings`, `/admin/cooldowns`, `/recent-decisions`, `/quarantine/recent`,
+  `/exposure/{did}`, `/strain/top`, `/labels/{subject_uri}`. Tests exercise the
+  actual ASGI app using an in-process transport, with no listening socket.
+- Public `/health` is liveness only. `/health/extended`, `/health/preflight` and
+  `/metrics` are unauthenticated diagnostics; they can expose local paths, cursor,
+  queue and runtime information. Framework API docs/schema are also public.
+  They are not safe to expose on an untrusted network. No HTTP service is required
+  for the accepted offline example. `python -m labeler.main` binds loopback;
+  `FIREHOSE_AUTO_START=1` is refused as unqualified.
+- `quarantine list/show` inspect local stored payloads under filesystem authority.
+  There is **no quarantine release API or CLI**. `release quarantine/promote`
+  only creates fingerprint-report manifests; it is not authorization, a signing
+  process, or label release. No token or manifest can publish a label here.
 
-# Release rail (quarantine -> promote)
-python -m labeler.cli release quarantine --report out/stability_report.json
-python -m labeler.cli release promote --in out/release_manifest_quarantine.json
-```
+## Storage and operating limits
 
-## Configuration
+SQLite defaults to `src/data/labeler.sqlite`; set `LABELER_DATA_DIR` before imports
+to choose an isolated directory. It uses WAL, a 60-second busy timeout and
+`synchronous=NORMAL`. SQLite serializes writes, but the legacy service has
+multiple connections and is not a proven single-writer architecture. A directory
+or volume must contain the SQLite database **and its WAL/SHM sidecars**. A live
+file copy is not a qualified backup procedure.
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `LABELER_EMIT_MODE` | `detect-only` | `detect-only`, `emit`, or `quarantine` |
-| `LABELER_EMIT_CONFIRM` | `false` | Must be `true` to enable live emission |
-| `LABELER_EMIT_MAX_PER_RECHECK` | — | Cap emits per recheck; exceeding trips quarantine |
-| `LABELER_EMIT_AUDIT_DIR` | `out/` | Override audit file output directory |
-| `LABELER_RULE_BUDGETS` | — | Per-rule caps (e.g., `provenance_laundering:5,assertiveness_increase:3`) |
-| `LABELER_RULE_BUDGET_WINDOW_HOURS` | `24` | Rolling window for budget enforcement |
-| `ENABLE_LONGITUDINAL_RECHECK` | `0` | Enable longitudinal recheck loop |
-| `ENABLE_CLAIM_RECHECK` | `0` | Enable claim-group recheck scheduling |
-| `CLAIM_RECHECK_MAX_PER_RUN` | — | Cap claim-group work per recheck loop |
-| `ENABLE_RETENTION` | `0` | Enable periodic retention loop (prune old data) |
-| `RETENTION_INTERVAL_HOURS` | `6` | Hours between retention passes |
-| `ADMIN_API_TOKEN` | — | Protect admin endpoints; open access if unset |
-| `FIREHOSE_WS_URL` | Jetstream US-East | Jetstream WebSocket endpoint |
-| `JETSTREAM_COLLECTIONS` | `post,repost` | Comma-separated collections to subscribe |
-| `ENABLE_FACTS_EXPORT` | `0` | Enable facts sidecar export for labelwatch bridge |
+The consumer has a bounded receive queue and batch writer, but its persisted
+cursor follows received messages rather than a proved committed prefix. Queue
+saturation/rollback can therefore leave gaps; shutdown cancels the drain and may
+save a cursor ahead of completed work. Graceful lossless shutdown, reliable
+acknowledgment, sustained operation and recovery are **UNQUALIFIED**. Do not start
+its module, worker or ingestion flags as a service from this artifact.
 
-## Invariants
+Persisted loss counters/heartbeat survive ordinary reads and a fresh interpreter.
+A consumer restart writes zero-initialized counters; lifetime totals and gap
+history do not survive that restart reliably. A missing health row returns
+`consumer: null` and may still report `ok`; this means unknown history, not proven
+coverage. Total store loss loses receipts, quarantine, counters and cursors; no
+historical continuity or recovery coverage is inferred.
 
-- Language may propose; only evidence commits state (ledger recorded).
-- Fingerprint version is a contract; changes require explicit bump and migration.
-- Emit is gated; default is detect-only and auditable.
-- Containment preserves records; nothing is silently dropped.
+The old [Compose file](docker-compose.yml), worker, DuckDB, Redis, retention,
+label-query ingestion, fingerprint promotion rail and facts/Labelwatch bridge are
+retained historical code, **UNQUALIFIED and outside the offline quickstart**.
+Compose ports are loopback-bound, but `.env` is still consumed. Docker flattens
+`src/` into `/app`, with a `/app/data` mount; repository execution instead defaults
+to `src/data`. Multi-process/network behavior has not been accepted. Do not run Compose as a supported demo. No new
+integration or live qualification is planned.
 
-## Architecture
+## Research context and provenance
 
-```
-Jetstream (JSON/WS) -> consumer -> events/edges/cursors (append-only)
-                          |                |
-                     put_nowait       claim_history (fingerprinted, longitudinal)
-                     (non-blocking)        |
-                          |           drift rules (assertiveness, provenance laundering)
-                     drain queue           |
-                          |           label_decisions (receipted)
-                     STATS heartbeat       |
-                                      emit_mode gate -> audit log / quarantine / live emit
-                                           |
-                                      facts_export -> facts.sqlite (labelwatch bridge)
-```
+The rules illustrate attribution loss, claim similarity and assertiveness signals;
+they are not validated moderation judgments. Rules can compare with later posts,
+produce false positives and repeat timestamp-varying labels. Fingerprint version
+`v1` and configuration hashes are research identities, not a migration guarantee.
+[Design notes](DESIGN_NOTES.md), [theory map](THEORY_TO_CODE.md) and [old roadmap](ROADMAP.md)
+are historical or illustrative, not implemented authority or a commitment to work.
 
-The consumer uses a non-blocking queue (`put_nowait`) to decouple the WebSocket
-receive loop from DB writes, preventing missed pings and reconnect churn. A disk
-pressure brake pauses event processing when disk usage exceeds thresholds. A
-platform health module (EWMA baseline) gates recheck enqueueing during stream
-degradation.
-
-## Related projects
-
-- [labelwatch](https://github.com/unpingable/atproto-labelwatch) — observatory
-  for ATProto's labeling infrastructure. Monitors labeler behavior, detects
-  anomalies, derives regime states, serves label climate reports. Driftwatch
-  exports facts to labelwatch via a SQLite sidecar bridge (`facts_export.py`).
-
-## Design notes
-
-See [DESIGN_NOTES.md](DESIGN_NOTES.md) for governance extensions (authority
-delegation, strain detection, label composition, temporal coherence) that are
-explicitly out of the runtime path but recorded for future coherence.
-
-## Related work
-
-This implementation is an artifact of a broader research program on temporal
-coherence and governance in hierarchical systems. The conceptual framework is
-developed in the Δt Framework preprint series (Beck, 2025–2026), starting with
-[The Coherence Criterion](https://zenodo.org/records/17726790). The governance gap addressed here — provenance is not
-governance — is formalized in the ATProto governance transfer proof.
-
-## License
-
-Unless otherwise noted, this repository is licensed under MIT OR Apache-2.0, at your option. Contributions are accepted under the same terms.
+This artifact comes from the Δt Framework research program (Beck, 2025–2026),
+starting with [The Coherence Criterion](https://zenodo.org/records/17726790).
+[Tooling provenance](PROVENANCE.md) and original authorship are preserved.
+Unless otherwise noted, licensing remains **MIT OR Apache-2.0**, at your option:
+[MIT](LICENSE-MIT), [Apache-2.0](LICENSE-APACHE).

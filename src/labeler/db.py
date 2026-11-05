@@ -8,7 +8,7 @@ import uuid
 from . import timeutil
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-DATA_DIR = ROOT / "data"
+DATA_DIR = pathlib.Path(os.getenv("LABELER_DATA_DIR", str(ROOT / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -431,7 +431,7 @@ def get_consumer_health(consumer: Optional[str] = None) -> Optional[dict]:
     }
 
 
-def insert_label(subject_uri: str, labeler_did: str, label: dict, ctime: Optional[str] = None, endpoint: Optional[str] = None) -> bool:
+def insert_label(subject_uri: str, labeler_did: str, label: dict, ctime: Optional[str] = None, endpoint: Optional[str] = None, record_decision: bool = True) -> bool:
     """Insert a label if the exact label payload is not already present for the subject.
 
     Returns True if a new row was inserted, False if it already existed.
@@ -458,25 +458,26 @@ def insert_label(subject_uri: str, labeler_did: str, label: dict, ctime: Optiona
     conn.close()
     metrics.LABELS_INSERTED.inc()
 
-    # Best-effort: write decision ledger entry for this label
-    try:
-        label_name = None
-        if isinstance(label, dict):
-            label_name = label.get("label") or label.get("val")
-        insert_label_decision(
-            subject_uri=subject_uri,
-            root_uri=label.get("root_uri") if isinstance(label, dict) else None,
-            label_name=label_name or "unknown",
-            rule_id=(label.get("rule_id") if isinstance(label, dict) else None) or "external_labeler",
-            fingerprint_version=(label.get("fingerprint_version") if isinstance(label, dict) else None),
-            inputs=label.get("inputs") if isinstance(label, dict) else None,
-            evidence_hashes=label.get("evidence_hashes") if isinstance(label, dict) else None,
-            decision_trace=label.get("decision_trace") if isinstance(label, dict) else None,
-            config_hash=label.get("config_hash") if isinstance(label, dict) else None,
-            status="committed",
-        )
-    except Exception:
-        pass
+    if record_decision:
+        # Best-effort: write decision ledger entry for this label
+        try:
+            label_name = None
+            if isinstance(label, dict):
+                label_name = label.get("label") or label.get("val")
+            insert_label_decision(
+                subject_uri=subject_uri,
+                root_uri=label.get("root_uri") if isinstance(label, dict) else None,
+                label_name=label_name or "unknown",
+                rule_id=(label.get("rule_id") if isinstance(label, dict) else None) or "external_labeler",
+                fingerprint_version=(label.get("fingerprint_version") if isinstance(label, dict) else None),
+                inputs=label.get("inputs") if isinstance(label, dict) else None,
+                evidence_hashes=label.get("evidence_hashes") if isinstance(label, dict) else None,
+                decision_trace=label.get("decision_trace") if isinstance(label, dict) else None,
+                config_hash=label.get("config_hash") if isinstance(label, dict) else None,
+                status="committed",
+            )
+        except Exception:
+            pass
 
     # Best-effort: record mapping labeler_did -> endpoint for adaptive per-DID cooldowns
     try:

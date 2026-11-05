@@ -1,5 +1,9 @@
 # Design Notes (Governance Extensions, Non-Operational)
 
+> Parked research material. This is not a development commitment or an implemented
+> service contract. The [README](README.md) and [closeout](docs/CLOSEOUT-2026-11-05.md)
+> define the verified offline scope and limitations.
+
 This document captures optional extensions that are **explicitly out of the MVP runtime path**.
 They are recorded here to keep future changes coherent and reversible.
 

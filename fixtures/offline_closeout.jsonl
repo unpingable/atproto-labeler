@@ -1,0 +1,3 @@
+{"uri":"uri:synthetic:root","cid":"1","authorDid":"did:example:synthetic","text":"According to source X, 100 people were evacuated.","createdAt":"2026-01-01T00:00:00Z"}
+{"uri":"uri:synthetic:later","cid":"2","authorDid":"did:example:synthetic","replyRootUri":"uri:synthetic:root","text":"100 people were evacuated.","createdAt":"2026-01-01T00:10:00Z"}
+{"uri":"uri:synthetic:last","cid":"3","authorDid":"did:example:other","replyRootUri":"uri:synthetic:root","text":"Unrelated 999 widgets.","createdAt":"2026-01-01T00:20:00Z"}

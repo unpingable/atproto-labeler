@@ -1,5 +1,9 @@
 # Labeler ROADMAP (Conservative, Operator-First)
 
+> Parked research material. This is not a development commitment or an implemented
+> service contract. The [README](README.md) and [closeout](docs/CLOSEOUT-2026-11-05.md)
+> define the verified offline scope and limitations.
+
 This roadmap is intentionally narrow. It favors reversible steps, observable outcomes,
 and explicit stop conditions to prevent scope creep.
 
